@@ -1,0 +1,77 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: opspulse-postgres
+    environment:
+      POSTGRES_DB: opspulse
+      POSTGRES_USER: opspulse
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-opspulse}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U opspulse -d opspulse"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: opspulse-redis
+    # appendonly on: rate-limit counters are disposable, but losing the whole
+    # keyspace on restart also drops warm dedup pointers, which briefly doubles
+    # Postgres load on the ingest path.
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Local SMTP sink with a web inbox at http://localhost:8025 -- lets you
+  # develop the whole notification path without a real mail provider.
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: opspulse-mailpit
+    ports:
+      - "1025:1025"   # SMTP
+      - "8025:8025"   # web UI
+    environment:
+      MP_MAX_MESSAGES: 500
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: opspulse-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/opspulse
+      DB_USER: opspulse
+      DB_PASSWORD: ${DB_PASSWORD:-opspulse}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      MAIL_HOST: mailpit
+      MAIL_PORT: 1025
+      JWT_SECRET: ${JWT_SECRET:-local-dev-secret-at-least-256-bits-long-do-not-ship-this}
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+
+volumes:
+  pgdata:
+  redisdata:

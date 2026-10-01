@@ -1,0 +1,6 @@
+# Normalise line endings so Windows (CRLF) and CI/Docker (LF) agree.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.png binary
+*.jpg binary
+*.jar binary
