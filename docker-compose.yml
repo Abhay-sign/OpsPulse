@@ -63,6 +63,9 @@ services:
       MAIL_HOST: mailpit
       MAIL_PORT: 1025
       JWT_SECRET: ${JWT_SECRET:-local-dev-secret-at-least-256-bits-long-do-not-ship-this}
+      # First-boot admin, created only while the users table is empty.
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-admin@opspulse.local}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-admin12345}
     ports:
       - "8080:8080"
     healthcheck:

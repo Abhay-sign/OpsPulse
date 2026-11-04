@@ -1,0 +1,11 @@
+# Loaded on top of src/main/resources/application.yml for every integration test.
+opspulse:
+  bootstrap:
+    admin-email: admin@opspulse.test
+    admin-password: admin-password-123
+  jwt:
+    secret: test-secret-that-is-definitely-longer-than-thirty-two-bytes
+
+logging:
+  level:
+    com.opspulse: INFO

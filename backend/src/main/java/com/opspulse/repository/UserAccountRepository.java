@@ -1,6 +1,7 @@
 package com.opspulse.repository;
 
 import com.opspulse.domain.entity.UserAccount;
+import com.opspulse.domain.enums.Role;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 
@@ -13,6 +14,8 @@ public interface UserAccountRepository extends JpaRepository<UserAccount, UUID> 
     Optional<UserAccount> findByEmailIgnoreCase(String email);
 
     boolean existsByEmailIgnoreCase(String email);
+
+    long countByRoleAndActiveTrue(Role role);
 
     /** Active members of a team -- the fan-out target for a TEAM escalation rule. */
     @Query("""

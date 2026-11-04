@@ -59,6 +59,10 @@ opspulse:
     dedup-cache-ttl: 1h
   escalation:
     sweep-interval-ms: 30000
+  bootstrap:
+    # Only used when the users table is empty (first boot).
+    admin-email: ${BOOTSTRAP_ADMIN_EMAIL:}
+    admin-password: ${BOOTSTRAP_ADMIN_PASSWORD:}
 
 logging:
   level:

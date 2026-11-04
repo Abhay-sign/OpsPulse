@@ -3,18 +3,21 @@ package com.opspulse.config;
 import lombok.Getter;
 import lombok.Setter;
 import org.springframework.boot.context.properties.ConfigurationProperties;
-import org.springframework.boot.context.properties.EnableConfigurationProperties;
 
 import java.time.Duration;
 
 @Getter @Setter
+/**
+ * Typed view of the "opspulse.*" block in application.yml. Registered by
+ * @ConfigurationPropertiesScan on OpsPulseApplication.
+ */
 @ConfigurationProperties(prefix = "opspulse")
-@EnableConfigurationProperties(OpsPulseProperties.class)
 public class OpsPulseProperties {
 
     private Jwt jwt = new Jwt();
     private Ingest ingest = new Ingest();
     private Escalation escalation = new Escalation();
+    private Bootstrap bootstrap = new Bootstrap();
 
     @Getter @Setter
     public static class Jwt {
@@ -35,5 +38,15 @@ public class OpsPulseProperties {
     public static class Escalation {
         private long sweepIntervalMs = 30_000;
         private int batchSize = 100;
+    }
+
+    /**
+     * First-run admin. Created only when the users table is empty, so these
+     * values are ignored forever after the first boot.
+     */
+    @Getter @Setter
+    public static class Bootstrap {
+        private String adminEmail;
+        private String adminPassword;
     }
 }
