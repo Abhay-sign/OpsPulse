@@ -66,6 +66,36 @@ public abstract class ApiTestSupport extends AbstractIntegrationTest {
                 .andExpect(status().isCreated()));
     }
 
+    /** A fresh team + service + API key. Each test gets its own service, so dedup keys never collide. */
+    protected Sender newSender() throws Exception {
+        String admin = adminToken();
+        var svc = createService(admin, createTeam(admin).get("id").asText());
+        var key = body(send(post("/api/v1/services/" + svc.get("id").asText() + "/api-keys"), admin, Map.of("name", "test"))
+                .andExpect(status().isCreated()));
+        return new Sender(UUID.fromString(svc.get("id").asText()), svc.get("serviceKey").asText(),
+                UUID.fromString(key.get("key").get("id").asText()), key.get("plaintextKey").asText());
+    }
+
+    protected record Sender(UUID serviceId, String serviceKey, UUID keyId, String apiKey) {
+        public com.opspulse.security.ApiKeyPrincipal principal() {
+            return new com.opspulse.security.ApiKeyPrincipal(keyId, serviceId, serviceKey);
+        }
+    }
+
+    protected ResultActions alert(Sender s, Map<String, ?> body) throws Exception {
+        return mvc.perform(post("/api/v1/alerts").header("X-API-Key", s.apiKey())
+                .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(body)));
+    }
+
+    protected static Map<String, Object> trigger(String fingerprint, String severity) {
+        return Map.of("fingerprint", fingerprint, "severity", severity, "summary", "Problem: " + fingerprint,
+                "source", "prometheus");
+    }
+
+    protected static Map<String, Object> resolveOf(String fingerprint) {
+        return Map.of("fingerprint", fingerprint, "eventType", "RESOLVE");
+    }
+
     protected ResultActions send(MockHttpServletRequestBuilder req, String token, Object body) throws Exception {
         if (token != null) req.header(HttpHeaders.AUTHORIZATION, "Bearer " + token);
         if (body != null) req.contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(body));
