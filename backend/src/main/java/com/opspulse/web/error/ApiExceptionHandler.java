@@ -3,6 +3,7 @@ package com.opspulse.web.error;
 import com.opspulse.common.error.ConflictException;
 import com.opspulse.common.error.InvalidCredentialsException;
 import com.opspulse.common.error.NotFoundException;
+import com.opspulse.common.error.RateLimitedException;
 import jakarta.persistence.OptimisticLockException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -58,6 +59,14 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     ProblemDetail staleWrite(Exception e) {
         return ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT,
                 "This record was changed by someone else. Reload and try again.");
+    }
+
+    /** 429 + Retry-After, so well-behaved senders back off for exactly as long as needed. */
+    @ExceptionHandler(RateLimitedException.class)
+    ResponseEntity<ProblemDetail> rateLimited(RateLimitedException e) {
+        return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+                .header(HttpHeaders.RETRY_AFTER, String.valueOf(e.retryAfterSeconds()))
+                .body(ProblemDetail.forStatusAndDetail(HttpStatus.TOO_MANY_REQUESTS, e.getMessage()));
     }
 
     @ExceptionHandler(InvalidCredentialsException.class)

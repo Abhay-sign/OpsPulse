@@ -3,6 +3,7 @@ package com.opspulse.domain.entity;
 import com.opspulse.domain.enums.IncidentStatus;
 import com.opspulse.domain.enums.Severity;
 import jakarta.persistence.*;
+import org.hibernate.annotations.DynamicUpdate;
 import lombok.*;
 
 import java.time.Instant;
@@ -19,7 +20,13 @@ import java.util.UUID;
  *  - @Version guards the lifecycle transitions. Two responders acknowledging
  *    simultaneously: one gets an OptimisticLockException rather than a silent
  *    lost update.
+ *  - alert_count/severity are bumped by ingest with a raw SQL UPDATE that does
+ *    NOT touch version (a new alert must not make an acknowledge fail).
+ *    @DynamicUpdate is what makes that safe: without it Hibernate writes EVERY
+ *    column on update, so a responder resolving a stale copy would overwrite
+ *    alert_count with the old number.
  */
+@DynamicUpdate   // UPDATE only the columns that changed -- see below
 @Entity
 @Table(name = "incidents")
 @Getter @Setter @NoArgsConstructor

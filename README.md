@@ -2,7 +2,7 @@
 
 A real-time incident management platform — alert ingestion, deduplication, escalation ladders, and a live dashboard. Spring Boot + PostgreSQL + Redis + React.
 
-**Status: phase 2 complete** — infrastructure, schema, entities, authentication (JWT + API keys) and admin CRUD.
+**Status: phase 3 complete** — infrastructure, schema, auth (JWT + API keys), admin CRUD, and alert ingestion with database-enforced deduplication.
 
 ---
 
@@ -28,9 +28,9 @@ CREATE UNIQUE INDEX uq_incidents_open_dedup
     WHERE status <> 'RESOLVED';
 ```
 
-Application-level "check then insert" has a race window; two replicas ingesting the same alert simultaneously would both pass the check. With this index, one insert wins and the other gets a constraint violation that the ingest path catches and turns into an attach. The index is *partial* so that the same problem recurring next week correctly opens a new incident.
+Application-level "check then insert" has a race window; two replicas ingesting the same alert simultaneously would both pass the check. With this index, the ingest path inserts with `ON CONFLICT ... DO NOTHING`: one insert wins, the other gets no row back and attaches to the winner instead (details in *Alert ingestion* below). The index is *partial* so that the same problem recurring next week correctly opens a new incident.
 
-`SchemaIntegrityTest` asserts all three behaviours.
+`SchemaIntegrityTest` asserts the index behaviour; `IngestConcurrencyTest` fires 25 identical alerts at the same instant and asserts exactly one incident with `alert_count = 25`.
 
 ---
 
@@ -87,7 +87,8 @@ opspulse/
 │       │   ├── repository/     10 Spring Data repositories
 │       │   ├── config/         Redis · ShedLock · two security chains · admin bootstrap
 │       │   ├── security/       JWT service + filter · API-key filter · refresh-token store
-│       │   ├── service/        Auth · User · Team · ServiceCatalog · ApiKey
+│       │   ├── ingest/         AlertIngestService · DedupCache · RateLimiter (Lua) · DedupKeys
+│       │   ├── service/        Auth · User · Team · ServiceCatalog · ApiKey · IncidentQuery
 │       │   └── web/            controllers · DTO records · RFC 7807 error handler
 │       └── resources/db/migration/V1__init.sql
 └── frontend/                   (phase 5)
@@ -153,7 +154,60 @@ A JWT is ignored on chain 1 and an API key is ignored on chain 2, so neither cre
 | GET | `/api/v1/services[?teamId=]` · `/services/{id}` | any user |
 | POST · PATCH · DELETE | `/api/v1/services` · `/services/{id}` | admin |
 | GET · POST · DELETE | `/api/v1/services/{id}/api-keys[/{keyId}]` | admin |
+| POST | `/api/v1/alerts` | API key |
 | GET | `/api/v1/alerts/auth-check` | API key |
+| GET | `/api/v1/incidents?status=&severity=&serviceId=&assigneeId=&openOnly=&page=&size=` | any user |
+| GET | `/api/v1/incidents/{id}` · `/{id}/alerts` · `/{id}/timeline` | any user |
+
+---
+
+## Alert ingestion (phase 3)
+
+```bash
+curl -X POST localhost:8080/api/v1/alerts -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+  -d '{"fingerprint":"cpu-high:web-03","severity":"SEV2","summary":"CPU above 95% on web-03","source":"prometheus"}'
+# 201 {"outcome":"CREATED",  "incidentId":"e29f…", ...}   first time
+# 200 {"outcome":"ATTACHED", "incidentId":"e29f…", ...}   every repeat
+# send {"fingerprint":"cpu-high:web-03","eventType":"RESOLVE"} to auto-resolve
+```
+
+The API key decides the service, so a sender can never raise alerts for someone else's service.
+
+**A TRIGGER alert, step by step**
+
+1. **Rate limit**: a token bucket per API key in Redis (a Lua script, so read-refill-spend is atomic across replicas). Over the limit → `429` with `Retry-After`.
+2. **Warm path**: Redis holds `dedup:{key} → incidentId`. If it's there, one statement attaches the alert:
+   ```sql
+   WITH cur AS (SELECT id, severity FROM incidents
+                 WHERE id = ? AND dedup_key = ? AND status <> 'RESOLVED' FOR UPDATE)
+   UPDATE incidents i SET alert_count = i.alert_count + 1,
+                          severity    = LEAST(i.severity, ?),   -- 'SEV1' < 'SEV2', so worse wins
+                          updated_at  = now()
+     FROM cur WHERE i.id = cur.id
+   RETURNING cur.severity;
+   ```
+   Zero rows back means the pointer was stale (a human resolved that incident), so we evict it and fall through. No SELECT is needed to find the incident.
+3. **Cold path**: `SELECT` the open incident. If found, attach as above.
+4. **Create**:
+   ```sql
+   INSERT INTO incidents (...) SELECT ... FROM services s WHERE s.id = ?
+   ON CONFLICT (dedup_key) WHERE status <> 'RESOLVED' DO NOTHING
+   RETURNING id;
+   ```
+   A row back means we created it. Nothing back means another request created it a moment earlier; loop to step 3, which now finds it.
+5. After commit, warm the Redis pointer. It is never set before commit, so it can't point at a row that rolled back.
+
+**Why `ON CONFLICT` and not catch-the-exception-and-retry.** In Postgres a failed statement aborts the whole transaction, so after catching a unique violation you can't even run the follow-up SELECT without a new transaction or a savepoint. `ON CONFLICT DO NOTHING` never raises. If another transaction is mid-insert on the same key, Postgres makes us wait for it to commit, then reports "nothing inserted". Under READ COMMITTED the next statement takes a fresh snapshot and sees the winner. One transaction, no exception, no retry. In the concurrency test about half the threads take that lost-the-race branch on every run.
+
+**Why the counter is a SQL increment, not `incident.setAlertCount(n + 1)`.** A read-modify-write in Java loses increments under concurrency. It would also bump `@Version`, so a responder's acknowledge would fail just because another alert arrived. `alert_count` is a counter, not a human edit, so it bypasses optimistic locking on purpose. `@DynamicUpdate` on `Incident` makes that safe: Hibernate then updates only the changed columns, so a responder saving a stale copy can't overwrite the counter.
+
+**RESOLVE alerts** close the open incident through the entity, so `@Version` protects against a human acknowledging it at the same instant (retried up to 3 times). With nothing open, the alert is stored and the response says `NO_OPEN_INCIDENT`.
+
+**Redis is never required.** Every Redis call fails open: no pointer means the Postgres path, and no rate limiter means the alert is accepted. Dropping real alerts because a cache is down would be the worst possible failure for a pager.
+
+**Severity only goes up.** A SEV1 arriving on a SEV3 incident raises it and writes a `SEVERITY_CHANGED` timeline event. A later SEV4 doesn't lower it.
+
+**Not every alert goes on the timeline.** A check flapping every 30 seconds would bury the human actions, so individual alerts are listed at `/incidents/{id}/alerts` and the timeline holds only state changes.
 
 ---
 
@@ -165,7 +219,7 @@ Not "caching" in the vague sense — five specific jobs:
 2. **Warm dedup pointers** — `SET dedup:{key} {incidentId} NX EX 3600` avoids a Postgres round trip on the hot ingest path. Postgres stays the source of truth; Redis is only a shortcut.
 3. **Rate limiting** — per-API-key token bucket as a Lua script, so check-and-decrement is atomic.
 4. **SSE fan-out** — see below.
-5. **Caching services and escalation policies** — read on every ingest, changed almost never.
+5. **Caching services and escalation policies** — read on every ingest, changed almost never. *(Not needed yet: the ingest path reads neither; the API key lookup already joins the service.)*
 
 Incidents are deliberately *not* cached. They mutate constantly and the invalidation cost outweighs the benefit.
 
@@ -185,7 +239,7 @@ Also — nginx buffers SSE by default and the stream will appear frozen. Set `pr
 |---|---|---|
 | 1 | Infra, schema, entities, repositories, health | ✅ |
 | 2 | Auth (JWT for humans, API keys for senders), users/teams/services CRUD | ✅ |
-| 3 | Alert ingestion + dedup → incident creation, with concurrency tests | |
+| 3 | Alert ingestion + dedup → incident creation, with concurrency tests | ✅ |
 | 4 | Incident lifecycle: ack, resolve, reassign, notes → timeline events | |
 | 5 | React dashboard (polling first) | |
 | 6 | SSE + Redis pub/sub fan-out | |
