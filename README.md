@@ -2,7 +2,7 @@
 
 A real-time incident management platform — alert ingestion, deduplication, escalation ladders, and a live dashboard. Spring Boot + PostgreSQL + Redis + React.
 
-**Status: phase 3 complete** — infrastructure, schema, auth (JWT + API keys), admin CRUD, and alert ingestion with database-enforced deduplication.
+**Status: phase 4 complete** — infrastructure, schema, auth (JWT + API keys), admin CRUD, alert ingestion with database-enforced deduplication, and the incident lifecycle (acknowledge, resolve, reassign, severity, notes) with an audit timeline.
 
 ---
 
@@ -88,7 +88,8 @@ opspulse/
 │       │   ├── config/         Redis · ShedLock · two security chains · admin bootstrap
 │       │   ├── security/       JWT service + filter · API-key filter · refresh-token store
 │       │   ├── ingest/         AlertIngestService · DedupCache · RateLimiter (Lua) · DedupKeys
-│       │   ├── service/        Auth · User · Team · ServiceCatalog · ApiKey · IncidentQuery
+│       │   ├── event/          IncidentChangedEvent · after-commit listeners
+│       │   ├── service/        Auth · User · Team · ServiceCatalog · ApiKey · IncidentQuery · IncidentCommand
 │       │   └── web/            controllers · DTO records · RFC 7807 error handler
 │       └── resources/db/migration/V1__init.sql
 └── frontend/                   (phase 5)
@@ -157,7 +158,9 @@ A JWT is ignored on chain 1 and an API key is ignored on chain 2, so neither cre
 | POST | `/api/v1/alerts` | API key |
 | GET | `/api/v1/alerts/auth-check` | API key |
 | GET | `/api/v1/incidents?status=&severity=&serviceId=&assigneeId=&openOnly=&page=&size=` | any user |
-| GET | `/api/v1/incidents/{id}` · `/{id}/alerts` · `/{id}/timeline` | any user |
+| GET | `/api/v1/incidents/{id}` (with `ETag`) · `/{id}/alerts` · `/{id}/timeline` | any user |
+| POST | `/api/v1/incidents/{id}/acknowledge` · `/resolve` · `/reassign` · `/notes` (optional `If-Match`) | responder, admin |
+| PATCH | `/api/v1/incidents/{id}/severity` (optional `If-Match`) | responder, admin |
 
 ---
 
@@ -211,6 +214,36 @@ The API key decides the service, so a sender can never raise alerts for someone 
 
 ---
 
+## Incident lifecycle (phase 4)
+
+```
+TRIGGERED ──acknowledge──► ACKNOWLEDGED ──resolve──► RESOLVED (terminal)
+    └──────────────────────resolve─────────────────────┘
+```
+
+The transitions live in one place, `IncidentStatus.canTransitionTo`, and every command asks it. An illegal move (ack twice, resolve a resolved incident) is a `409` with a readable message.
+
+| Command | Effect | Timeline event |
+|---|---|---|
+| `POST /incidents/{id}/acknowledge` | → ACKNOWLEDGED; takes ownership if unassigned; stops escalation (phase 7) | `ACKNOWLEDGED` |
+| `POST /incidents/{id}/resolve` `{note?}` | → RESOLVED, records who; frees the dedup key | `RESOLVED` |
+| `POST /incidents/{id}/reassign` `{userId}` | new owner (active, not a viewer); same owner is a no-op | `REASSIGNED` (from/to) |
+| `PATCH /incidents/{id}/severity` `{severity}` | open incidents only | `SEVERITY_CHANGED` |
+| `POST /incidents/{id}/notes` `{message}` | allowed after resolution (root cause, follow-ups) | `NOTE_ADDED` |
+
+Commands need RESPONDER or ADMIN; viewers can only watch. Each command is one transaction that changes the row, appends the timeline event (the same table is the audit log, `actor_user_id = NULL` meaning the system), and publishes an `IncidentChangedEvent`.
+
+**Two kinds of "someone got there first"**
+
+- **Concurrent write.** Two responders click Acknowledge in the same instant and both transactions read version 3. `@Version` lets one commit, and the other fails at flush with `409`. `IncidentConcurrencyTest` repeats this race 5 times and asserts exactly one winner and one `ACKNOWLEDGED` row every time.
+- **Stale view.** Bob opened the page a minute ago at version 3; Alice has since acknowledged it. That isn't concurrent, so `@Version` alone wouldn't stop Bob's click from acting on a state he never saw. So `GET /incidents/{id}` returns `ETag: "3"`, and a command may send it back as `If-Match: "3"`. If it no longer matches, the result is `412 Precondition Failed` and nothing changes. `If-Match` is optional, since scripts don't need it, but the dashboard will always send it.
+
+New alerts don't count as "changed" for this purpose. Ingest bumps `alert_count` without touching `version`, so a flapping check can't make every responder action fail with `412` (tested).
+
+**Domain events, delivered after commit.** Commands and ingest publish `IncidentChangedEvent` inside their transaction, and listeners use `@TransactionalEventListener` (AFTER_COMMIT), so a rolled-back change never triggers a side effect. The first listener drops the Redis dedup pointer when an incident is resolved. Phase 6 adds the SSE fan-out and phase 7 the notifier as more listeners, without touching the write paths.
+
+---
+
 ## What Redis is for
 
 Not "caching" in the vague sense — five specific jobs:
@@ -240,7 +273,7 @@ Also — nginx buffers SSE by default and the stream will appear frozen. Set `pr
 | 1 | Infra, schema, entities, repositories, health | ✅ |
 | 2 | Auth (JWT for humans, API keys for senders), users/teams/services CRUD | ✅ |
 | 3 | Alert ingestion + dedup → incident creation, with concurrency tests | ✅ |
-| 4 | Incident lifecycle: ack, resolve, reassign, notes → timeline events | |
+| 4 | Incident lifecycle: ack, resolve, reassign, notes → timeline events | ✅ |
 | 5 | React dashboard (polling first) | |
 | 6 | SSE + Redis pub/sub fan-out | |
 | 7 | Escalation policies, sweeper job, email outbox | |

@@ -34,18 +34,32 @@ public final class IncidentDtos {
                                  String dedupKey, UUID serviceId, String serviceName, UUID teamId, String teamName,
                                  UUID assignedUserId, String assignedUserName, UUID escalationPolicyId,
                                  int currentEscalationLevel, int alertCount, Instant createdAt, Instant updatedAt,
-                                 Instant acknowledgedAt, Instant resolvedAt, int version) {
+                                 Instant acknowledgedAt, Instant resolvedAt, UUID resolvedByUserId,
+                                 String resolvedByName, int version) {
         public static IncidentDetail from(Incident i) {
             UserAccount a = i.getAssignedUser();
+            UserAccount r = i.getResolvedByUser();
             var s = i.getService();
             return new IncidentDetail(i.getId(), i.getTitle(), i.getDescription(), i.getSeverity(), i.getStatus(),
                     i.getDedupKey(), s.getId(), s.getName(), s.getTeam().getId(), s.getTeam().getName(),
                     a == null ? null : a.getId(), a == null ? null : a.getFullName(),
                     i.getEscalationPolicy() == null ? null : i.getEscalationPolicy().getId(),
                     i.getCurrentEscalationLevel(), i.getAlertCount(), i.getCreatedAt(), i.getUpdatedAt(),
-                    i.getAcknowledgedAt(), i.getResolvedAt(), i.getVersion());
+                    i.getAcknowledgedAt(), i.getResolvedAt(),
+                    r == null ? null : r.getId(), r == null ? null : r.getFullName(), i.getVersion());
         }
     }
+
+    // ---- commands -----------------------------------------------------------
+
+    public record ResolveRequest(@jakarta.validation.constraints.Size(max = 4000) String note) {}
+
+    public record ReassignRequest(@jakarta.validation.constraints.NotNull UUID userId) {}
+
+    public record NoteRequest(@jakarta.validation.constraints.NotBlank
+                              @jakarta.validation.constraints.Size(max = 4000) String message) {}
+
+    public record SeverityRequest(@jakarta.validation.constraints.NotNull Severity severity) {}
 
     /** actorId/actorName are null when the system acted (ingest, escalation). */
     public record TimelineEntry(UUID id, IncidentEventType type, String message, UUID actorId, String actorName,

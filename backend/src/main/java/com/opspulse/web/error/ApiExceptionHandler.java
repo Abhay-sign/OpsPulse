@@ -3,6 +3,7 @@ package com.opspulse.web.error;
 import com.opspulse.common.error.ConflictException;
 import com.opspulse.common.error.InvalidCredentialsException;
 import com.opspulse.common.error.NotFoundException;
+import com.opspulse.common.error.PreconditionFailedException;
 import com.opspulse.common.error.RateLimitedException;
 import jakarta.persistence.OptimisticLockException;
 import lombok.extern.slf4j.Slf4j;
@@ -67,6 +68,11 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
         return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
                 .header(HttpHeaders.RETRY_AFTER, String.valueOf(e.retryAfterSeconds()))
                 .body(ProblemDetail.forStatusAndDetail(HttpStatus.TOO_MANY_REQUESTS, e.getMessage()));
+    }
+
+    @ExceptionHandler(PreconditionFailedException.class)
+    ProblemDetail preconditionFailed(PreconditionFailedException e) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.PRECONDITION_FAILED, e.getMessage());
     }
 
     @ExceptionHandler(InvalidCredentialsException.class)

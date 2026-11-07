@@ -49,6 +49,15 @@ public abstract class ApiTestSupport extends AbstractIntegrationTest {
         return login(email, "password-123").get("accessToken").asText();
     }
 
+    /** A user plus their token, for tests that need the id too (assignee checks, actor names). */
+    protected record Actor(String id, String token) {}
+
+    protected Actor actor(String role) throws Exception {
+        String email = unique(role.toLowerCase()) + "@opspulse.test";
+        String id = createUser(email, role).get("id").asText();
+        return new Actor(id, login(email, "password-123").get("accessToken").asText());
+    }
+
     protected JsonNode createUser(String email, String role) throws Exception {
         return body(send(post("/api/v1/users"), adminToken(), Map.of(
                 "email", email, "fullName", "Test " + role, "password", "password-123", "role", role))

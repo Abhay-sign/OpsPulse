@@ -10,6 +10,7 @@ import com.opspulse.domain.enums.AlertEventType;
 import com.opspulse.domain.enums.IncidentEventType;
 import com.opspulse.domain.enums.IncidentStatus;
 import com.opspulse.domain.enums.Severity;
+import com.opspulse.event.IncidentChangedEvent;
 import com.opspulse.repository.IncidentRepository;
 import com.opspulse.security.ApiKeyPrincipal;
 import com.opspulse.web.dto.AlertDtos.AlertRequest;
@@ -17,6 +18,7 @@ import com.opspulse.web.dto.AlertDtos.IngestResponse;
 import com.opspulse.web.dto.AlertDtos.Outcome;
 import jakarta.persistence.EntityManager;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.stereotype.Service;
@@ -74,10 +76,12 @@ public class AlertIngestService {
     private final RateLimiter rateLimiter;
     private final OpsPulseProperties props;
     private final TransactionTemplate tx;
+    private final ApplicationEventPublisher events;
 
     public AlertIngestService(JdbcTemplate jdbc, EntityManager em, IncidentRepository incidents,
                               DedupCache dedupCache, RateLimiter rateLimiter, OpsPulseProperties props,
-                              PlatformTransactionManager txManager) {
+                              PlatformTransactionManager txManager, ApplicationEventPublisher events) {
+        this.events = events;
         this.jdbc = jdbc;
         this.em = em;
         this.incidents = incidents;
@@ -93,9 +97,8 @@ public class AlertIngestService {
 
         String dedupKey = DedupKeys.of(sender.serviceId(), req.fingerprint());
         if (req.eventTypeOrDefault() == AlertEventType.RESOLVE) {
-            IngestResponse r = resolveWithRetry(sender, req, dedupKey);
-            if (r.outcome() == Outcome.RESOLVED) dedupCache.evict(dedupKey);
-            return r;
+            // the Redis pointer is dropped by DedupCacheInvalidator once the resolve commits
+            return resolveWithRetry(sender, req, dedupKey);
         }
 
         validateTrigger(req);
@@ -130,6 +133,7 @@ public class AlertIngestService {
                 Alert alert = saveAlert(sender.serviceId(), incidentId, req, dedupKey, severity);
                 recordEvent(incidentId, IncidentEventType.CREATED,
                         "Incident opened by " + sourceOf(req) + " alert", Map.of("alertId", alert.getId()));
+                publish(incidentId, IncidentEventType.CREATED, IncidentStatus.TRIGGERED, dedupKey);
                 return new IngestResponse(alert.getId(), incidentId, Outcome.CREATED, dedupKey);
             }
             // lost the race: a concurrent request inserted it; next round's SELECT will find it
@@ -175,6 +179,10 @@ public class AlertIngestService {
             recordEvent(incidentId, IncidentEventType.SEVERITY_CHANGED,
                     "Severity raised from " + before + " to " + severity + " by a new alert",
                     Map.of("from", before.name(), "to", severity.name(), "alertId", alert.getId()));
+            publish(incidentId, IncidentEventType.SEVERITY_CHANGED, null, dedupKey);
+        } else {
+            // the counter changed; the dashboard (phase 6) wants to know, the timeline doesn't
+            publish(incidentId, IncidentEventType.ALERT_ATTACHED, null, dedupKey);
         }
         return Optional.of(new IngestResponse(alert.getId(), incidentId, Outcome.ATTACHED, dedupKey));
     }
@@ -238,6 +246,7 @@ public class AlertIngestService {
         Alert alert = saveAlert(sender.serviceId(), incident.getId(), req, dedupKey, severity);
         recordEvent(incident.getId(), IncidentEventType.RESOLVED,
                 "Auto-resolved: " + sourceOf(req) + " reported the problem cleared", Map.of("alertId", alert.getId()));
+        publish(incident.getId(), IncidentEventType.RESOLVED, IncidentStatus.RESOLVED, dedupKey);
         return new IngestResponse(alert.getId(), incident.getId(), Outcome.RESOLVED, dedupKey);
     }
 
@@ -262,6 +271,11 @@ public class AlertIngestService {
         IncidentEvent e = IncidentEvent.of(em.getReference(Incident.class, incidentId), type, null, message);
         e.setPayload(new HashMap<>(payload));
         em.persist(e);
+    }
+
+    /** status null = "open, unchanged by this event". Listeners run only after commit. */
+    private void publish(UUID incidentId, IncidentEventType type, IncidentStatus status, String dedupKey) {
+        events.publishEvent(new IncidentChangedEvent(incidentId, type, status, dedupKey, null));
     }
 
     private static String sourceOf(AlertRequest req) {
