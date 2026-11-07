@@ -75,6 +75,17 @@ services:
       retries: 12
       start_period: 40s
 
+  # React app served by nginx, which also proxies /api to the backend.
+  frontend:
+    build:
+      context: ./frontend
+    container_name: opspulse-frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "3000:80"
+
 volumes:
   pgdata:
   redisdata:

@@ -40,6 +40,10 @@ public interface IncidentRepository extends JpaRepository<Incident, UUID> {
     /**
      * Dashboard list. Every filter is optional: a null parameter disables its
      * clause, which keeps this to one query instead of a Specification tree.
+     *
+     * Ordered for triage, not chronology: nobody-has-it before someone-has-it,
+     * then worst severity ('SEV1' sorts before 'SEV2' as a string), then newest.
+     * The top row is always the thing the on-call should look at next.
      */
     @Query("""
            select i from Incident i
@@ -50,7 +54,12 @@ public interface IncidentRepository extends JpaRepository<Incident, UUID> {
               and (:serviceId  is null or s.id = :serviceId)
               and (:assigneeId is null or i.assignedUser.id = :assigneeId)
               and (:openOnly = false or i.status <> com.opspulse.domain.enums.IncidentStatus.RESOLVED)
-            order by i.createdAt desc
+            order by case i.status
+                       when com.opspulse.domain.enums.IncidentStatus.TRIGGERED then 0
+                       when com.opspulse.domain.enums.IncidentStatus.ACKNOWLEDGED then 1
+                       else 2 end,
+                     i.severity,
+                     i.createdAt desc
            """)
     Page<Incident> search(@Param("status") IncidentStatus status,
                           @Param("severity") Severity severity,
@@ -80,6 +89,29 @@ public interface IncidentRepository extends JpaRepository<Incident, UUID> {
                                             @Param("batchSize") int batchSize);
 
     long countByStatus(IncidentStatus status);
+
+    /** Dashboard: open incidents bucketed by status x severity, in ONE query instead of eight counts. */
+    @Query("""
+           select i.status, i.severity, count(i) from Incident i
+            where i.status <> com.opspulse.domain.enums.IncidentStatus.RESOLVED
+            group by i.status, i.severity
+           """)
+    List<Object[]> countOpenByStatusAndSeverity();
+
+    long countByResolvedAtAfter(Instant after);
+
+    /**
+     * Mean time to acknowledge / resolve, in seconds, over incidents in the
+     * window. NULL when nothing qualified. The two numbers on-call teams are
+     * actually judged by.
+     */
+    @Query(value = """
+           SELECT avg(extract(epoch FROM acknowledged_at - created_at)) FILTER (WHERE acknowledged_at IS NOT NULL) AS mtta,
+                  avg(extract(epoch FROM resolved_at - created_at))     FILTER (WHERE resolved_at IS NOT NULL)     AS mttr
+             FROM incidents
+            WHERE created_at > :since
+           """, nativeQuery = true)
+    List<Object[]> responseTimesSince(@Param("since") Instant since);
 
     @Query("""
            select count(i) from Incident i

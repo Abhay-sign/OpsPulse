@@ -50,6 +50,10 @@ public class IncidentController {
         return query.search(status, severity, serviceId, assigneeId, openOnly, page, size);
     }
 
+    /** Declared before /{id} only for readability; Spring prefers the literal path anyway. */
+    @GetMapping("/stats")
+    public IncidentStats stats() { return query.stats(); }
+
     @GetMapping("/{id}")
     public ResponseEntity<IncidentDetail> get(@PathVariable UUID id) { return withETag(query.get(id)); }
 

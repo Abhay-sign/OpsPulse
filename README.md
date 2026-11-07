@@ -2,7 +2,7 @@
 
 A real-time incident management platform — alert ingestion, deduplication, escalation ladders, and a live dashboard. Spring Boot + PostgreSQL + Redis + React.
 
-**Status: phase 4 complete** — infrastructure, schema, auth (JWT + API keys), admin CRUD, alert ingestion with database-enforced deduplication, and the incident lifecycle (acknowledge, resolve, reassign, severity, notes) with an audit timeline.
+**Status: phase 5 complete** — backend (auth, ingestion with database-enforced dedup, incident lifecycle with audit timeline) plus a React dashboard.
 
 ---
 
@@ -43,6 +43,7 @@ docker compose up --build
 
 | | URL |
 |---|---|
+| Dashboard | http://localhost:3000 |
 | API | http://localhost:8080 |
 | Deep health check | http://localhost:8080/api/v1/health |
 | Mailpit inbox | http://localhost:8025 |
@@ -62,6 +63,12 @@ Backend only, against compose-managed infra:
 ```bash
 docker compose up -d postgres redis mailpit
 cd backend && mvn spring-boot:run
+```
+
+Frontend with hot reload, against that backend (Vite proxies `/api` to `:8080`):
+
+```bash
+cd frontend && npm install && npm run dev      # http://localhost:5173
 ```
 
 Tests (needs a running Docker daemon — Testcontainers starts its own Postgres and Redis):
@@ -92,7 +99,14 @@ opspulse/
 │       │   ├── service/        Auth · User · Team · ServiceCatalog · ApiKey · IncidentQuery · IncidentCommand
 │       │   └── web/            controllers · DTO records · RFC 7807 error handler
 │       └── resources/db/migration/V1__init.sql
-└── frontend/                   (phase 5)
+└── frontend/                   React 19 + TypeScript + Vite
+    ├── Dockerfile · nginx.conf multi-stage build; nginx serves the app and proxies /api
+    └── src/
+        ├── api/                typed client (token handling, single-flight refresh), endpoints, types
+        ├── auth/               session restore, login/logout, role checks for the UI
+        ├── lib/                tiny router · usePolling · alert grouping · time formatting
+        ├── components/         pressure strip · badges · toasts
+        └── pages/              Incidents · Incident detail · Services & keys · People · Sign in
 ```
 
 ---
@@ -158,6 +172,7 @@ A JWT is ignored on chain 1 and an API key is ignored on chain 2, so neither cre
 | POST | `/api/v1/alerts` | API key |
 | GET | `/api/v1/alerts/auth-check` | API key |
 | GET | `/api/v1/incidents?status=&severity=&serviceId=&assigneeId=&openOnly=&page=&size=` | any user |
+| GET | `/api/v1/incidents/stats` (open by status × severity, resolved 24 h, MTTA/MTTR 7 d) | any user |
 | GET | `/api/v1/incidents/{id}` (with `ETag`) · `/{id}/alerts` · `/{id}/timeline` | any user |
 | POST | `/api/v1/incidents/{id}/acknowledge` · `/resolve` · `/reassign` · `/notes` (optional `If-Match`) | responder, admin |
 | PATCH | `/api/v1/incidents/{id}/severity` (optional `If-Match`) | responder, admin |
@@ -244,6 +259,29 @@ New alerts don't count as "changed" for this purpose. Ingest bumps `alert_count`
 
 ---
 
+## Dashboard (phase 5)
+
+| Page | What it's for |
+|---|---|
+| **Incidents** | The pressure strip (open incidents split by severity, plus mean time to acknowledge and to resolve over 7 days) above a list sorted for triage: unowned first, then worst severity, then newest. Filters live in the URL, so a view can be bookmarked or shared. |
+| **Incident detail** | Acknowledge, resolve with a note, reassign, change severity, add notes, timeline, recent alerts (runs of identical alerts collapse into one line). |
+| **Services** | Add services and teams; create and revoke API keys. A new key is shown once, with a ready-to-paste `curl` test alert. |
+| **People** | Admins add users and change roles (no public sign-up). |
+
+**One origin, no CORS.** In dev, Vite proxies `/api` to the backend; in Docker, nginx serves the built files and proxies `/api`. The browser never makes a cross-origin request, so there's no CORS config to get wrong and no API URL baked into the bundle.
+
+**Polling done properly** (`usePolling`). The next request is scheduled only after the previous one returns, so a slow backend never builds a queue. Polling pauses in background tabs and refreshes instantly when the tab comes back. Old data stays on screen during a refresh (no flicker). Changing a filter aborts the in-flight request, so a slow old response can't overwrite a newer one. Phase 6 replaces most polling with server push.
+
+**Tokens and the refresh race.** The access token lives only in memory; the refresh token is in `localStorage` so a reload stays signed in (trade-off: readable by XSS; an httpOnly cookie is stricter but needs CSRF handling). When the access token expires, several polls get `401` at once. If each refreshed separately, the first would rotate the token and the rest would present a used one, which the server treats as theft and rejects, signing the user out. So all `401`s await **one shared refresh promise** and then retry. `client.test.ts` fires three simultaneous requests and asserts exactly one refresh, and it fails if the sharing is removed.
+
+**Every action sends `If-Match`.** The UI sends the version it is showing. On `412` it says someone else changed the incident, reloads, and keeps what you typed, so you can check and resubmit.
+
+**Roles in the UI are hints only.** Viewers don't see action buttons and non-admins don't see People, but every rule is enforced by the server.
+
+**Why no router or data library.** Five routes and one data pattern didn't justify React Router plus TanStack Query; a small History-API router and one polling hook keep the bundle small and every behaviour visible. Both would be the right call as the app grows.
+
+---
+
 ## What Redis is for
 
 Not "caching" in the vague sense — five specific jobs:
@@ -274,7 +312,7 @@ Also — nginx buffers SSE by default and the stream will appear frozen. Set `pr
 | 2 | Auth (JWT for humans, API keys for senders), users/teams/services CRUD | ✅ |
 | 3 | Alert ingestion + dedup → incident creation, with concurrency tests | ✅ |
 | 4 | Incident lifecycle: ack, resolve, reassign, notes → timeline events | ✅ |
-| 5 | React dashboard (polling first) | |
+| 5 | React dashboard (polling first) | ✅ |
 | 6 | SSE + Redis pub/sub fan-out | |
 | 7 | Escalation policies, sweeper job, email outbox | |
 | 8 | CI hardening, image publishing | |

@@ -13,7 +13,11 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Duration;
+import java.time.Instant;
+import java.util.EnumMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /** Read side of incidents. Writes (ack, resolve, reassign, notes) arrive in phase 4. */
@@ -33,6 +37,24 @@ public class IncidentQueryService {
         var pageable = PageRequest.of(Math.max(page, 0), Math.min(Math.max(size, 1), MAX_PAGE_SIZE));
         return PageResponse.of(incidents.search(status, severity, serviceId, assigneeId, openOnly, pageable),
                 IncidentSummary::from);
+    }
+
+    public IncidentStats stats() {
+        Map<Severity, Long> bySeverity = new EnumMap<>(Severity.class);
+        for (Severity s : Severity.values()) bySeverity.put(s, 0L);
+        long triggered = 0, acknowledged = 0;
+        for (Object[] row : incidents.countOpenByStatusAndSeverity()) {
+            IncidentStatus status = (IncidentStatus) row[0];
+            long n = ((Number) row[2]).longValue();
+            bySeverity.merge((Severity) row[1], n, Long::sum);
+            if (status == IncidentStatus.TRIGGERED) triggered += n; else acknowledged += n;
+        }
+        Instant now = Instant.now();
+        Object[] times = incidents.responseTimesSince(now.minus(Duration.ofDays(7))).get(0);
+        return new IncidentStats(triggered + acknowledged, triggered, acknowledged, bySeverity,
+                incidents.countByResolvedAtAfter(now.minus(Duration.ofHours(24))),
+                times[0] == null ? null : ((Number) times[0]).doubleValue(),
+                times[1] == null ? null : ((Number) times[1]).doubleValue());
     }
 
     public IncidentDetail get(UUID id) {

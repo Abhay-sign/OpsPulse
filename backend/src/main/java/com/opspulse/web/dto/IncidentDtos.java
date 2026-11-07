@@ -50,6 +50,14 @@ public final class IncidentDtos {
         }
     }
 
+    /**
+     * openBySeverity always has all four keys (zeros included) so the UI never
+     * has to guess. Times are seconds, null when there is no data yet.
+     */
+    public record IncidentStats(long open, long triggered, long acknowledged,
+                                Map<Severity, Long> openBySeverity, long resolvedLast24h,
+                                Double mttaSeconds7d, Double mttrSeconds7d) {}
+
     // ---- commands -----------------------------------------------------------
 
     public record ResolveRequest(@jakarta.validation.constraints.Size(max = 4000) String note) {}
